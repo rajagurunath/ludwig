@@ -27,11 +27,14 @@ from ludwig.features.base_feature import BaseFeature
 from ludwig.features.base_feature import InputFeature
 from ludwig.models.modules.image_encoders import ResNetEncoder
 from ludwig.models.modules.image_encoders import Stacked2DCNN
-from ludwig.utils.image_utils import get_abs_path
-from ludwig.utils.image_utils import resize_image
+from ludwig.utils.data_utils import get_abs_path
+from ludwig.utils.image_utils import greyscale
 from ludwig.utils.image_utils import num_channels_in_image
+from ludwig.utils.image_utils import resize_image
 from ludwig.utils.misc import get_from_registry
 from ludwig.utils.misc import set_default_value
+
+logger = logging.getLogger(__name__)
 
 
 class ImageBaseFeature(BaseFeature):
@@ -42,7 +45,8 @@ class ImageBaseFeature(BaseFeature):
     preprocessing_defaults = {
         'missing_value_strategy': BACKFILL,
         'in_memory': True,
-        'resize_method': 'crop_or_pad'
+        'resize_method': 'interpolate',
+        'scaling': 'pixel_normalization'
     }
 
     @staticmethod
@@ -52,13 +56,15 @@ class ImageBaseFeature(BaseFeature):
         }
 
     @staticmethod
-    def _read_image_and_resize(filepath,
-                               img_width,
-                               img_height,
-                               should_resize,
-                               num_channels,
-                               resize_method,
-                               user_specified_num_channels):
+    def _read_image_and_resize(
+            filepath,
+            img_width,
+            img_height,
+            should_resize,
+            num_channels,
+            resize_method,
+            user_specified_num_channels
+    ):
         """
         :param filepath: path to the image
         :param img_width: expected width of the image
@@ -84,15 +90,26 @@ class ImageBaseFeature(BaseFeature):
         if img_num_channels == 1:
             img = img.reshape((img.shape[0], img.shape[1], 1))
 
+        if should_resize:
+            img = resize_image(img, (img_height, img_width), resize_method)
+
         if user_specified_num_channels is True:
+
+            # convert to greyscale if needed
+            if num_channels == 1 and (
+                    img_num_channels == 3 or img_num_channels == 4):
+                img = greyscale(img)
+                img_num_channels = 1
+
             # Number of channels is specified by the user
-            img_padded = np.zeros((img_height, img_width, num_channels))
+            img_padded = np.zeros((img_height, img_width, num_channels),
+                                  dtype=np.uint8)
             min_num_channels = min(num_channels, img_num_channels)
-            img_padded[:,:,:min_num_channels] = img[:,:,:min_num_channels]
+            img_padded[:, :, :min_num_channels] = img[:, :, :min_num_channels]
             img = img_padded
 
             if img_num_channels != num_channels:
-                logging.warning(
+                logger.warning(
                     "Image {0} has {1} channels, where as {2}"
                     " channels are expected. Dropping/adding channels"
                     "with 0s as appropriate".format(
@@ -102,12 +119,11 @@ class ImageBaseFeature(BaseFeature):
             if img_num_channels != num_channels:
                 raise ValueError(
                     'Image {0} has {1} channels, unlike the first image, which'
-                    ' has {2} channels'.format(filepath,
-                                               img_num_channels,
-                                               num_channels))
-        if should_resize:
-            img = resize_image(img, (img_height, img_width), resize_method)
-
+                    ' has {2} channels. Make sure all the iamges have the same'
+                    'number of channels or use the num_channels property in'
+                    'image preprocessing'.format(filepath,
+                                                 img_num_channels,
+                                                 num_channels))
         return img
 
     @staticmethod
@@ -195,12 +211,12 @@ class ImageBaseFeature(BaseFeature):
         if feature['preprocessing']['in_memory']:
             data[feature['name']] = np.empty(
                 (num_images, height, width, num_channels),
-                dtype=np.int8
+                dtype=np.uint8
             )
             for i in range(len(dataset_df)):
                 filepath = get_abs_path(
-                        csv_path,
-                        dataset_df[feature['name']][i]
+                    csv_path,
+                    dataset_df[feature['name']][i]
                 )
 
                 img = ImageBaseFeature._read_image_and_resize(
@@ -212,7 +228,20 @@ class ImageBaseFeature(BaseFeature):
                     preprocessing_parameters['resize_method'],
                     user_specified_num_channels
                 )
-                data[feature['name']][i, :, :, :] = img
+                try:
+                    data[feature['name']][i, :, :, :] = img
+                except:
+                    logger.error(
+                        "Images are not of the same size. "
+                        "Expected size is {}, "
+                        "current image size is {}."
+                        "Images are expected to be all of the same size"
+                        "or explicit image width and height are expected"
+                        "to be provided. "
+                        "Additional information: https://uber.github.io/ludwig/user_guide/#image-features-preprocessing"
+                            .format(first_image.shape, img.shape)
+                    )
+                    raise
         else:
             data_fp = os.path.splitext(dataset_df.csv)[0] + '.hdf5'
             mode = 'w'
@@ -226,8 +255,8 @@ class ImageBaseFeature(BaseFeature):
                 )
                 for i in range(len(dataset_df)):
                     filepath = get_abs_path(
-                            csv_path,
-                            dataset_df[feature['name']][i]
+                        csv_path,
+                        dataset_df[feature['name']][i]
                     )
 
                     img = ImageBaseFeature._read_image_and_resize(
@@ -252,6 +281,7 @@ class ImageInputFeature(ImageBaseFeature, InputFeature):
         self.height = 0
         self.width = 0
         self.num_channels = 0
+        self.scaling = 'pixel_normalization'
 
         self.encoder = 'stacked_cnn'
 
@@ -281,7 +311,13 @@ class ImageInputFeature(ImageBaseFeature, InputFeature):
             **kwargs
     ):
         placeholder = self._get_input_placeholder()
-        logging.debug('  targets_placeholder: {0}'.format(placeholder))
+        logger.debug('  placeholder: {0}'.format(placeholder))
+
+        scaled = get_from_registry(
+            self.scaling,
+            image_scaling_registry
+        )(placeholder)
+        logger.debug('  scaled: {0}'.format(scaled))
 
         feature_representation, feature_representation_size = self.encoder_obj(
             placeholder,
@@ -289,7 +325,7 @@ class ImageInputFeature(ImageBaseFeature, InputFeature):
             dropout_rate,
             is_training,
         )
-        logging.debug(
+        logger.debug(
             '  feature_representation: {0}'.format(feature_representation)
         )
 
@@ -309,8 +345,8 @@ class ImageInputFeature(ImageBaseFeature, InputFeature):
             *args,
             **kwargs
     ):
-        for dim in ['height', 'width', 'num_channels']:
-            input_feature[dim] = feature_metadata['preprocessing'][dim]
+        for key in ['height', 'width', 'num_channels', 'scaling']:
+            input_feature[key] = feature_metadata['preprocessing'][key]
 
     @staticmethod
     def populate_defaults(input_feature):
@@ -321,4 +357,10 @@ class ImageInputFeature(ImageBaseFeature, InputFeature):
 image_encoder_registry = {
     'stacked_cnn': Stacked2DCNN,
     'resnet': ResNetEncoder
+}
+
+image_scaling_registry = {
+    'pixel_normalization': lambda x: x * 1.0 / 255,
+    'pixel_standardization': lambda x: tf.map_fn(
+        lambda f: tf.image.per_image_standardization(f), x)
 }

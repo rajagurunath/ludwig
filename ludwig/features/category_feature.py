@@ -39,6 +39,8 @@ from ludwig.utils.misc import set_default_value
 from ludwig.utils.strings_utils import UNKNOWN_SYMBOL
 from ludwig.utils.strings_utils import create_vocabulary
 
+logger = logging.getLogger(__name__)
+
 
 class CategoryBaseFeature(BaseFeature):
     def __init__(self, feature):
@@ -72,7 +74,8 @@ class CategoryBaseFeature(BaseFeature):
         return np.array(
             column.map(
                 lambda x: (
-                    metadata['str2idx'][x] if x in metadata['str2idx']
+                    metadata['str2idx'][x.strip()]
+                    if x.strip() in metadata['str2idx']
                     else metadata['str2idx'][UNKNOWN_SYMBOL]
                 )
             ),
@@ -146,7 +149,7 @@ class CategoryInputFeature(CategoryBaseFeature, InputFeature):
             **kwargs
     ):
         placeholder = self._get_input_placeholder()
-        logging.debug('  placeholder: {0}'.format(placeholder))
+        logger.debug('  placeholder: {0}'.format(placeholder))
 
         # ================ Embeddings ================
         embedded, embedding_size = self.embed(
@@ -155,7 +158,7 @@ class CategoryInputFeature(CategoryBaseFeature, InputFeature):
             dropout_rate,
             is_training=is_training
         )
-        logging.debug('  feature_representation: {0}'.format(
+        logger.debug('  feature_representation: {0}'.format(
             embedded))
 
         feature_representation = {
@@ -242,16 +245,16 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
                 initializer=initializer_obj([hidden_size, self.num_classes]),
                 regularizer=regularizer
             )
-            logging.debug('  class_weights: {0}'.format(weights))
+            logger.debug('  class_weights: {0}'.format(weights))
 
             biases = tf.get_variable(
                 'biases',
                 [self.num_classes]
             )
-            logging.debug('  class_biases: {0}'.format(biases))
+            logger.debug('  class_biases: {0}'.format(biases))
 
             logits = tf.matmul(hidden, weights) + biases
-            logging.debug('  logits: {0}'.format(logits))
+            logger.debug('  logits: {0}'.format(logits))
 
             probabilities = tf.nn.softmax(
                 logits,
@@ -297,7 +300,7 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
 
                 if (class_similarities.shape[0] != self.num_classes or
                         class_similarities.shape[1] != self.num_classes):
-                    logging.info(
+                    logger.info(
                         'Class similarities is {} while num classes is {}'.format(
                             class_similarities.shape,
                             self.num_classes
@@ -307,8 +310,8 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
                             class_similarities.shape[1] > self.num_classes):
                         # keep only the first num_classes rows and columns
                         class_similarities = class_similarities[
-                                          :self.num_classes,
-                                          :self.num_classes
+                                             :self.num_classes,
+                                             :self.num_classes
                                              ]
                     elif (class_similarities.shape[0] < self.num_classes and
                           class_similarities.shape[1] < self.num_classes):
@@ -338,7 +341,7 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
                     name='vector_labels_{}'.format(self.name)
                 )
 
-            if self.loss['type'] == 'sampled_softmax_cross_entropy':
+            if self.loss['type'] == SAMPLED_SOFTMAX_CROSS_ENTROPY:
                 train_loss, eval_loss = sampled_softmax_cross_entropy(
                     targets,
                     hidden,
@@ -349,7 +352,7 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
                     self.loss,
                     self.num_classes
                 )
-            elif self.loss['type'] == 'softmax_cross_entropy':
+            elif self.loss['type'] == SOFTMAX_CROSS_ENTROPY:
                 train_loss = weighted_softmax_cross_entropy(
                     logits,
                     vector_labels,
@@ -404,6 +407,8 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
             hidden,
             hidden_size,
             regularizer=None,
+            dropout_rate=None,
+            is_training=None,
             **kwargs
     ):
         output_tensors = {}
@@ -411,7 +416,7 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
         # ================ Placeholder ================
         targets = self._get_output_placeholder()
         output_tensors[self.name] = targets
-        logging.debug('  targets_placeholder: {0}'.format(targets))
+        logger.debug('  targets_placeholder: {0}'.format(targets))
 
         # ================ Predictions ================
         outs = self._get_predictions(
@@ -508,16 +513,16 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
                     'class_similarities_temperature']
 
                 curr_row = 0
-                first_row_lenght = 0
+                first_row_length = 0
                 is_first_row = True
                 for row in similarities:
                     if is_first_row:
-                        first_row_lenght = len(row)
+                        first_row_length = len(row)
                         is_first_row = False
                         curr_row += 1
                     else:
-                        curr_row_lenght = len(row)
-                        if curr_row_lenght != first_row_lenght:
+                        curr_row_length = len(row)
+                        if curr_row_length != first_row_length:
                             raise ValueError(
                                 'The length of row {} of the class_similarities '
                                 'of {} is {}, different from the length of '
@@ -525,13 +530,13 @@ class CategoryOutputFeature(CategoryBaseFeature, OutputFeature):
                                 'the same length.'.format(
                                     curr_row,
                                     output_feature['name'],
-                                    curr_row_lenght,
-                                    first_row_lenght
+                                    curr_row_length,
+                                    first_row_length
                                 )
                             )
                         else:
                             curr_row += 1
-                all_rows_length = first_row_lenght
+                all_rows_length = first_row_length
 
                 if all_rows_length != len(similarities):
                     raise ValueError(
